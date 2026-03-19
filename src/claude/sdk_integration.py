@@ -1,6 +1,7 @@
 """Claude Code Python SDK integration."""
 
 import asyncio
+import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -196,6 +197,12 @@ class ClaudeSDKManager:
                 sdk_allowed_tools = self.config.claude_allowed_tools
                 sdk_disallowed_tools = self.config.claude_disallowed_tools
 
+            # Discover installed CLI plugins
+            discovered_plugins = self._discover_plugins()
+            extra_plugin_dirs = self.config.claude_plugin_dirs or []
+            for d in extra_plugin_dirs:
+                discovered_plugins.append({"type": "local", "path": d})
+
             # Build Claude Agent options
             options = ClaudeAgentOptions(
                 max_turns=self.config.claude_max_turns,
@@ -212,7 +219,8 @@ class ClaudeSDKManager:
                     "excludedCommands": self.config.sandbox_excluded_commands or [],
                 },
                 system_prompt=base_prompt,
-                setting_sources=["project"],
+                setting_sources=["user", "project"],
+                plugins=discovered_plugins if discovered_plugins else None,
                 stderr=_stderr_callback,
             )
 
@@ -524,6 +532,68 @@ class ClaudeSDKManager:
 
         except Exception as e:
             logger.warning("Stream callback failed", error=str(e))
+
+    def _discover_plugins(self) -> List[Dict[str, str]]:
+        """Discover installed CLI plugins from ~/.claude/plugins/cache/.
+
+        Returns a list of plugin descriptors suitable for ClaudeAgentOptions.plugins,
+        e.g. [{"type": "local", "path": "/root/.claude/plugins/cache/mp/plug/1.0"}].
+        """
+        plugins: List[Dict[str, str]] = []
+        cache_dir = Path.home() / ".claude" / "plugins" / "cache"
+        if not cache_dir.is_dir():
+            return plugins
+
+        # Also consult installed_plugins.json for the pinned version of each plugin,
+        # so we resolve the correct version directory under cache/.
+        installed_versions: Dict[str, str] = {}
+        installed_json = Path.home() / ".claude" / "plugins" / "installed_plugins.json"
+        if installed_json.is_file():
+            try:
+                data = json.loads(installed_json.read_text(encoding="utf-8"))
+                for entry in data if isinstance(data, list) else []:
+                    name = entry.get("name", "")
+                    version = entry.get("version", "")
+                    if name and version:
+                        installed_versions[name] = version
+            except (json.JSONDecodeError, OSError) as e:
+                logger.debug("Could not read installed_plugins.json", error=str(e))
+
+        for marketplace_dir in cache_dir.iterdir():
+            if not marketplace_dir.is_dir():
+                continue
+            for plugin_dir in marketplace_dir.iterdir():
+                if not plugin_dir.is_dir():
+                    continue
+                # Determine which version to use: prefer installed_plugins.json,
+                # then fall back to the lexicographically latest version dir.
+                lookup_key = f"{plugin_dir.name}@{marketplace_dir.name}"
+                pinned = installed_versions.get(lookup_key)
+                version_dir = None
+                if pinned:
+                    candidate = plugin_dir / pinned
+                    if candidate.is_dir():
+                        version_dir = candidate
+                if version_dir is None:
+                    version_dirs = sorted(
+                        [d for d in plugin_dir.iterdir() if d.is_dir()],
+                        key=lambda d: d.name,
+                        reverse=True,
+                    )
+                    if version_dirs:
+                        version_dir = version_dirs[0]
+                if version_dir and (
+                    version_dir / ".claude-plugin" / "plugin.json"
+                ).is_file():
+                    plugins.append({"type": "local", "path": str(version_dir)})
+                    logger.info(
+                        "Discovered plugin",
+                        plugin=plugin_dir.name,
+                        marketplace=marketplace_dir.name,
+                        path=str(version_dir),
+                    )
+
+        return plugins
 
     def _load_mcp_config(self, config_path: Path) -> Dict[str, Any]:
         """Load MCP server configuration from a JSON file.
