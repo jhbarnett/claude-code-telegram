@@ -120,6 +120,10 @@ class Settings(BaseSettings):
         default=[],
         description="List of explicitly disallowed Claude tools/commands",
     )
+    claude_plugin_dirs: Optional[List[str]] = Field(
+        default=None,
+        description="Additional plugin directories to load (comma-separated paths)",
+    )
 
     # Sandbox settings
     sandbox_enabled: bool = Field(
@@ -300,6 +304,19 @@ class Settings(BaseSettings):
             return [int(uid.strip()) for uid in v.split(",") if uid.strip()]
         if isinstance(v, list):
             return [int(uid) for uid in v]
+        return v  # type: ignore[no-any-return]
+
+    @field_validator("claude_plugin_dirs", mode="before")
+    @classmethod
+    def parse_claude_plugin_dirs(cls, v: Any) -> Optional[List[str]]:
+        """Parse comma-separated plugin directory paths."""
+        if v is None:
+            return None
+        if isinstance(v, str):
+            dirs = [d.strip() for d in v.split(",") if d.strip()]
+            return dirs if dirs else None
+        if isinstance(v, list):
+            return [str(d) for d in v]
         return v  # type: ignore[no-any-return]
 
     @field_validator("claude_allowed_tools", mode="before")
